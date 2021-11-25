@@ -1,0 +1,171 @@
+local api = vim.api
+local lsp = vim.lsp
+
+local M = {}
+
+function M.show_line_diagnostics()
+  local opts = {
+    focusable = false,
+    close_events = { "BufLeave", "CursorMoved", "InsertEnter", "FocusLost" },
+    border = 'single'
+  }
+  lsp.diagnostic.show_line_diagnostics(opts)
+end
+
+local custom_attach = function(client, bufnr)
+  local function buf_set_keymap(...)
+    api.nvim_buf_set_keymap(bufnr, ...)
+  end
+
+  require "lsp_signature".on_attach()
+
+  -- Mappings.
+  local opts = { noremap = true, silent = true }
+  buf_set_keymap("n", "gd", "<Cmd>lua vim.lsp.buf.definition()<CR>", opts)
+  buf_set_keymap("n", "<C-]>", "<Cmd>lua vim.lsp.buf.definition()<CR>", opts)
+  buf_set_keymap("n", "K", "<Cmd>lua vim.lsp.buf.hover()<CR>", opts)
+  buf_set_keymap("n", "<C-k>", "<cmd>lua vim.lsp.buf.signature_help()<CR>", opts)
+  buf_set_keymap("n", "<space>wa", "<cmd>lua vim.lsp.buf.add_workspace_folder()<CR>", opts)
+  buf_set_keymap("n", "<space>wr", "<cmd>lua vim.lsp.buf.remove_workspace_folder()<CR>", opts)
+  buf_set_keymap("n", "<space>wl", "<cmd>lua print(vim.inspect(vim.lsp.buf.list_workspace_folders()))<CR>", opts)
+  buf_set_keymap("n", "<space>rn", "<cmd>lua vim.lsp.buf.rename()<CR>", opts)
+  buf_set_keymap("n", "gr", "<cmd>lua vim.lsp.buf.references()<CR>", opts)
+  buf_set_keymap("n", "[d", "<cmd>lua vim.lsp.diagnostic.goto_prev()<CR>", opts)
+  buf_set_keymap("n", "]d", "<cmd>lua vim.lsp.diagnostic.goto_next()<CR>", opts)
+  buf_set_keymap("n", "<space>q", "<cmd>lua vim.lsp.diagnostic.set_loclist()<CR>", opts)
+  buf_set_keymap("n", "<space>ca", "<cmd>lua vim.lsp.buf.code_action()<CR>", opts)
+
+  vim.cmd([[
+    autocmd CursorHold <buffer> lua require('config.lsp').show_line_diagnostics()
+  ]])
+
+  -- Set some key bindings conditional on server capabilities
+  if client.resolved_capabilities.document_formatting then
+    buf_set_keymap("n", "<space>cf", "<cmd>lua vim.lsp.buf.formatting()<CR>", opts)
+  end
+  if client.resolved_capabilities.document_range_formatting then
+    buf_set_keymap("x", "<space>cf", "<cmd>lua vim.lsp.buf.range_formatting()<CR><ESC>", opts)
+  end
+
+  -- The blow command will highlight the current variable and its usages in the buffer.
+  if client.resolved_capabilities.document_highlight then
+    vim.cmd([[
+      hi link LspReferenceRead Visual
+      hi link LspReferenceText Visual
+      hi link LspReferenceWrite Visual
+      augroup lsp_document_highlight
+        autocmd! * <buffer>
+        autocmd CursorHold <buffer> lua vim.lsp.buf.document_highlight()
+        autocmd CursorMoved <buffer> lua vim.lsp.buf.clear_references()
+      augroup END
+    ]])
+  end
+
+  if vim.g.logging_level == 'debug' then
+    local msg = string.format("Language server %s started!", client.name)
+    vim.notify(msg, 'info', {title = 'Nvim-config'})
+  end
+end
+
+local capabilities = require('cmp_nvim_lsp').update_capabilities(lsp.protocol.make_client_capabilities())
+capabilities.textDocument.completion.completionItem.snippetSupport = true
+
+local lspconfig = require("lspconfig")
+
+lspconfig.pyright.setup{
+  on_attach = custom_attach,
+  capabilities = capabilities
+}
+
+require'lspconfig'.dartls.setup{
+  cmd = {"dart", "language-server", "--client-id", "nvim-lsp", "--client-version", "1.0"},
+  on_attach = custom_attach
+}
+
+local sumneko_binary_path = vim.fn.exepath("lua-language-server")
+local sumneko_root_path = vim.fn.fnamemodify(sumneko_binary_path, ":h:h:h")
+
+local runtime_path = vim.split(package.path, ";")
+table.insert(runtime_path, "lua/?.lua")
+table.insert(runtime_path, "lua/?/init.lua")
+
+require("lspconfig").sumneko_lua.setup({
+  on_attach = custom_attach,
+  cmd = { sumneko_binary_path, "-E", sumneko_root_path .. "/main.lua" },
+  settings = {
+    Lua = {
+      runtime = {
+        -- Tell the language server which version of Lua you're using (most likely LuaJIT in the case of Neovim)
+        version = "LuaJIT",
+        -- Setup your lua path
+        path = runtime_path,
+      },
+      diagnostics = {
+        -- Get the language server to recognize the `vim` global
+        globals = { "vim" },
+      },
+      workspace = {
+        -- Make the server aware of Neovim runtime files
+        library = api.nvim_get_runtime_file("", true),
+      },
+      -- Do not send telemetry data containing a randomized but unique identifier
+      telemetry = {
+        enable = false,
+      },
+    },
+  },
+  capabilities = capabilities,
+})
+
+-- Change diagnostic signs.
+vim.fn.sign_define("LspDiagnosticsSignError", { text = "✗", texthl = "LspDiagnosticsDefaultError" })
+vim.fn.sign_define("LspDiagnosticsSignWarning", { text = "!", texthl = "LspDiagnosticsDefaultWarning" })
+vim.fn.sign_define("LspDiagnosticsSignInformation", { text = "", texthl = "LspDiagnosticsDefaultInformation" })
+vim.fn.sign_define("LspDiagnosticsSignHint", { text = "", texthl = "LspDiagnosticsDefaultHint" })
+
+lsp.handlers["textDocument/publishDiagnostics"] = lsp.with(lsp.diagnostic.on_publish_diagnostics, {
+  underline = false,
+  virtual_text = false,
+  signs = true,
+  update_in_insert = false,
+})
+
+-- Refs: https://github.com/neovim/nvim-lspconfig/wiki/UI-customization#show-source-in-diagnostics
+lsp.handlers["textDocument/publishDiagnostics"] = function(_, result, context, _)
+  -- result contains diagnostics and uri
+  -- context contains client_id and method, but not always buf_nr
+  local client_id = context.client_id
+  local diagnostics = result.diagnostics
+  local uri = result.uri
+
+  local bufnr = vim.uri_to_bufnr(uri)
+  if not bufnr then
+    return
+  end
+
+  if not api.nvim_buf_is_loaded(bufnr) then
+    return
+  end
+
+  -- change diagnostics format
+  for i, v in ipairs(diagnostics) do
+    diagnostics[i].message = string.format("%s: %s", v.source, v.message)
+  end
+  lsp.diagnostic.save(diagnostics, bufnr, client_id)
+
+  local config = {
+    underline = false,
+    virtual_text = false,
+    signs = true,
+    update_in_insert = false,
+  }
+  lsp.diagnostic.display(diagnostics, bufnr, client_id, config)
+end
+
+-- The following settings works with the bleeding edge neovim.
+-- See https://github.com/neovim/neovim/pull/13998.
+lsp.handlers["textDocument/hover"] = lsp.with(vim.lsp.handlers.hover, {
+  border = "rounded",
+})
+
+return M
